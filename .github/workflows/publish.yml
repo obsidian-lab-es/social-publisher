@@ -1,0 +1,102 @@
+name: publish
+
+# Workflow reutilizable. Los repos de cliente lo invocan con `uses:` y le pasan
+# sus propios secrets. El motor no contiene datos de ningun cliente.
+on:
+  workflow_call:
+    inputs:
+      client_prefix:
+        description: Prefijo de las claves en el bucket de R2 (p.ej. "invin")
+        type: string
+        required: true
+      dry_run:
+        description: Si es true, valida y sube a R2 pero no llama a Meta
+        type: boolean
+        default: true
+      calendar:
+        type: string
+        default: _calendario.md
+      posts_dir:
+        type: string
+        default: posts
+      engine_ref:
+        description: Rama o tag del motor a usar
+        type: string
+        default: main
+    secrets:
+      # Ninguno es `required` para que un dry-run funcione antes de tener
+      # Meta o R2 configurados. El script falla con un mensaje claro si falta
+      # alguno en una ejecucion real.
+      META_TOKEN: {required: false}
+      IG_USER_ID: {required: false}
+      FB_PAGE_ID: {required: false}
+      R2_ACCOUNT_ID: {required: false}
+      R2_ACCESS_KEY_ID: {required: false}
+      R2_SECRET_ACCESS_KEY: {required: false}
+      R2_BUCKET: {required: false}
+      R2_PUBLIC_URL: {required: false}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # para escribir el estado de vuelta en el calendario
+    # Dos ejecuciones a la vez podrian publicar el mismo post dos veces.
+    concurrency:
+      group: publish-${{ github.repository }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout de los datos del cliente
+        uses: actions/checkout@v4
+
+      - name: Checkout del motor
+        uses: actions/checkout@v4
+        with:
+          repository: obsidian-lab-es/social-publisher
+          ref: ${{ inputs.engine_ref }}
+          path: .engine
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .engine/requirements.txt
+
+      - run: pip install -r .engine/requirements.txt
+
+      - name: Publicar
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: |
+          python -m publisher.publish run \
+            --calendar "${{ inputs.calendar }}" \
+            --posts-dir "${{ inputs.posts_dir }}" \
+            --client-prefix "${{ inputs.client_prefix }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      # `always()` es deliberado. Si Instagram publica y Facebook falla, el paso
+      # anterior sale con codigo 1 pero el calendario YA esta actualizado. Si no
+      # se guardase ese estado, la siguiente ejecucion volveria a publicar en
+      # Instagram y saldria un post duplicado.
+      - name: Guardar estado en el calendario
+        if: ${{ always() && !inputs.dry_run }}
+        run: |
+          if git diff --quiet; then
+            echo "Sin cambios que guardar."
+            exit 0
+          fi
+          git config user.name "social-publisher[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(publish): actualiza estado del calendario [skip ci]"
+          git push

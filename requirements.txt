@@ -1,0 +1,6 @@
+requests>=2.32
+boto3>=1.35
+Pillow>=10.4
+# Windows no trae base de datos de zonas horarias y algunas imagenes Linux
+# minimas tampoco. Sin esto, ZoneInfo("Europe/Madrid") revienta al importar.
+tzdata>=2024.1
