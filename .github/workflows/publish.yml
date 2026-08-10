@@ -13,6 +13,10 @@ on:
         description: Si es true, valida y sube a R2 pero no llama a Meta
         type: boolean
         default: true
+      mode:
+        description: '"run" para publicar, "check" para verificar credenciales (solo lectura)'
+        type: string
+        default: run
       calendar:
         type: string
         default: _calendario.md
@@ -65,7 +69,25 @@ jobs:
 
       - run: pip install -r .engine/requirements.txt
 
+      # Permite verificar token, permisos e IDs desde la pestana Actions, sin
+      # tener que poner el token tambien en la maquina local.
+      - name: Comprobar credenciales
+        if: ${{ inputs.mode == 'check' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: python -m publisher.publish check
+
       - name: Publicar
+        if: ${{ inputs.mode == 'run' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.engine
           PYTHONUTF8: "1"
@@ -89,7 +111,7 @@ jobs:
       # se guardase ese estado, la siguiente ejecucion volveria a publicar en
       # Instagram y saldria un post duplicado.
       - name: Guardar estado en el calendario
-        if: ${{ always() && !inputs.dry_run }}
+        if: ${{ always() && inputs.mode == 'run' && !inputs.dry_run }}
         run: |
           if git diff --quiet; then
             echo "Sin cambios que guardar."
