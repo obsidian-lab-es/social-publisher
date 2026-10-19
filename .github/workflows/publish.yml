@@ -14,9 +14,13 @@ on:
         type: boolean
         default: true
       mode:
-        description: '"run" para publicar, "check" para verificar credenciales (solo lectura)'
+        description: '"run" publica, "check" verifica credenciales, "refresh" renueva el token'
         type: string
         default: run
+      route:
+        description: '"instagram" (sin Pagina de Facebook) o "facebook" (IG + Pagina)'
+        type: string
+        default: instagram
       calendar:
         type: string
         default: _calendario.md
@@ -39,6 +43,9 @@ on:
       R2_SECRET_ACCESS_KEY: {required: false}
       R2_BUCKET: {required: false}
       R2_PUBLIC_URL: {required: false}
+      # Solo para `mode: refresh`. El GITHUB_TOKEN del runner no puede escribir
+      # secrets, asi que la renovacion necesita un PAT con permiso sobre ellos.
+      GH_PAT: {required: false}
 
 jobs:
   publish:
@@ -76,6 +83,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/.engine
           PYTHONUTF8: "1"
+          META_ROUTE: ${{ inputs.route }}
           META_TOKEN: ${{ secrets.META_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
@@ -86,11 +94,36 @@ jobs:
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
         run: python -m publisher.publish check
 
+      # El token de la ruta `instagram` caduca a los 60 dias. Este paso lo
+      # renueva y reescribe el secret, para no tener que repetir el login.
+      - name: Renovar el token de Instagram
+        if: ${{ inputs.mode == 'refresh' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_ROUTE: ${{ inputs.route }}
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+        run: python -m publisher.publish refresh-token --out "$RUNNER_TEMP/token.txt"
+
+      - name: Guardar el token nuevo en el secret
+        if: ${{ inputs.mode == 'refresh' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::falta el secret GH_PAT (PAT con permiso de escritura sobre secrets)"
+            exit 1
+          fi
+          gh secret set META_TOKEN --repo "${{ github.repository }}" < "$RUNNER_TEMP/token.txt"
+          rm -f "$RUNNER_TEMP/token.txt"
+          echo "META_TOKEN actualizado en ${{ github.repository }}"
+
       - name: Publicar
         if: ${{ inputs.mode == 'run' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.engine
           PYTHONUTF8: "1"
+          META_ROUTE: ${{ inputs.route }}
           META_TOKEN: ${{ secrets.META_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}

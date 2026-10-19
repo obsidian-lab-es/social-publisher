@@ -1,5 +1,18 @@
 """Cliente minimo de la Graph API para publicar en Instagram y en una Pagina de Facebook.
 
+Hay **dos rutas** y se eligen con `META_ROUTE`:
+
+- `instagram` (por defecto): *Instagram API with Instagram Login*, contra
+  `graph.instagram.com`. No necesita Pagina de Facebook ni que la cuenta este
+  vinculada a ninguna. En cambio el token es de usuario de Instagram y **caduca
+  a los 60 dias**, asi que hay que renovarlo (`refresh_long_lived_token`).
+- `facebook`: la ruta clasica contra `graph.facebook.com`, con token de System
+  User que no caduca. Publica tambien en la Pagina, pero exige tener *Control
+  total* de una Pagina vinculada a la cuenta de Instagram.
+
+Los endpoints de publicacion en Instagram son identicos en las dos; lo unico
+que cambia es el host, el tipo de token y si hay o no publicacion en Facebook.
+
 Dos cosas que la documentacion de Meta no deja obvias y que estan resueltas aqui:
 
 1. Un contenedor de carrusel tarda en procesarse. Llamar a `media_publish` antes
@@ -22,7 +35,19 @@ import requests
 # v25.0 es la actual (feb 2026). v23.0 esta comodamente dentro de soporte y los
 # endpoints de publicacion son identicos; se puede subir con GRAPH_VERSION.
 GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v23.0")
-BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
+
+IG_HOST = "https://graph.instagram.com"
+FB_HOST = "https://graph.facebook.com"
+ROUTES = ("instagram", "facebook")
+
+ROUTE = os.environ.get("META_ROUTE", "instagram").strip().lower()
+if ROUTE not in ROUTES:
+    # Una errata aqui publicaria contra el host equivocado con el token
+    # equivocado, asi que revienta en el import y no a mitad del flujo.
+    raise ValueError(f"META_ROUTE={ROUTE!r} no es valido; usa uno de {ROUTES}")
+
+PUBLISHES_TO_FACEBOOK = ROUTE == "facebook"
+BASE = f"{FB_HOST if PUBLISHES_TO_FACEBOOK else IG_HOST}/{GRAPH_VERSION}"
 
 TIMEOUT = 60
 POLL_INTERVAL = 5
@@ -64,7 +89,31 @@ def _get(path: str, token: str, **params: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def account_info(ig_user_id: str, token: str) -> dict[str, Any]:
-    return _get(ig_user_id, token, fields="username,name")
+    """Datos basicos de la cuenta. `ig_user_id` acepta `me` en la ruta instagram.
+
+    `account_type` no esta expuesto en todas las rutas y versiones. Si Meta lo
+    rechaza se reintenta sin el campo: el `check` existe para confirmar que el
+    token funciona, y un campo de menos no es motivo para darlo por roto.
+    """
+    try:
+        return _get(ig_user_id, token, fields="username,name,account_type")
+    except MetaError:
+        return _get(ig_user_id, token, fields="username,name")
+
+
+def refresh_long_lived_token(token: str) -> dict[str, Any]:
+    """Renueva el token de usuario de Instagram y devuelve el nuevo.
+
+    Solo aplica a la ruta `instagram`. Condiciones de Meta: el token tiene que
+    tener **mas de 24 h** y no haber caducado. Pasados 60 dias sin renovar ya no
+    se puede recuperar; hay que repetir el login a mano. De ahi el cron mensual.
+    """
+    resp = requests.get(
+        f"{IG_HOST}/refresh_access_token",
+        params={"grant_type": "ig_refresh_token", "access_token": token},
+        timeout=TIMEOUT,
+    )
+    return _check(resp)
 
 
 def publishing_limit(ig_user_id: str, token: str) -> int:
@@ -145,7 +194,7 @@ def publish_instagram(
 
 
 # --------------------------------------------------------------------------
-# Facebook: foto multiple en la Pagina
+# Facebook: foto multiple en la Pagina (solo ruta `facebook`)
 # --------------------------------------------------------------------------
 
 def upload_unpublished_photo(page_id: str, token: str, image_url: str) -> str:

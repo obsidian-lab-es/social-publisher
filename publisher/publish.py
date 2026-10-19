@@ -5,6 +5,11 @@ Tres subcomandos, que se corresponden con los pasos de verificacion del plan:
     validate  valida todos los posts en local. No toca la red.
     check     comprueba token, permisos e IDs con llamadas de solo lectura.
     run       publica como mucho un post vencido. Con --dry-run no llama a Meta.
+
+    refresh-token  renueva el token de Instagram (solo ruta `instagram`).
+
+La ruta se elige con `META_ROUTE` (ver `meta.py`). En la ruta `instagram` no se
+publica en Facebook y `FB_PAGE_ID` no hace falta.
 """
 
 from __future__ import annotations
@@ -37,6 +42,20 @@ def _env(name: str) -> str:
     if not value:
         _fail(f"falta la variable de entorno {name}")
     return value
+
+
+def _ig_id() -> str:
+    """ID de la cuenta de Instagram.
+
+    En la ruta `instagram` el token ya identifica la cuenta, asi que `me` vale y
+    `IG_USER_ID` pasa a ser opcional: un ID menos que copiar y que equivocar.
+    """
+    value = (os.environ.get("IG_USER_ID") or "").strip()
+    if value:
+        return value
+    if meta.PUBLISHES_TO_FACEBOOK:
+        _fail("falta la variable de entorno IG_USER_ID")
+    return "me"
 
 
 def _looks_like_post(path: Path) -> bool:
@@ -81,17 +100,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     token = _env("META_TOKEN")
-    ig_id = _env("IG_USER_ID")
-    page_id = _env("FB_PAGE_ID")
+    ig_id = _ig_id()
 
-    print(f"Graph API {meta.GRAPH_VERSION}")
+    print(f"Ruta: {meta.ROUTE}  ({meta.BASE})")
     try:
         info = meta.account_info(ig_id, token)
         print(f"[OK]   Instagram: @{info.get('username')} ({info.get('name', '')})".rstrip())
+        print(f"[OK]   Tipo de cuenta: {info.get('account_type', 'no expuesto en esta ruta')}")
         used = meta.publishing_limit(ig_id, token)
         print(f"[OK]   Cuota usada en 24h: {used}/100")
-        page = meta.page_info(page_id, token)
-        print(f"[OK]   Pagina de Facebook: {page.get('name')}")
+        if meta.PUBLISHES_TO_FACEBOOK:
+            page = meta.page_info(_env("FB_PAGE_ID"), token)
+            print(f"[OK]   Pagina de Facebook: {page.get('name')}")
+        else:
+            print("[INFO] Facebook desactivado en esta ruta (no hace falta Pagina)")
     except meta.MetaError as exc:
         _fail(str(exc))
 
@@ -164,16 +186,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"IG  POST /{{ig}}/media  x{len(urls)}  is_carousel_item=true")
         print(f"IG  POST /{{ig}}/media  media_type=CAROUSEL children={len(urls)}")
         print("IG  POST /{ig}/media_publish")
-        print(f"FB  POST /{{page}}/photos published=false  x{len(urls)}")
-        print("FB  POST /{page}/feed  attached_media")
+        if meta.PUBLISHES_TO_FACEBOOK:
+            print(f"FB  POST /{{page}}/photos published=false  x{len(urls)}")
+            print("FB  POST /{page}/feed  attached_media")
         print("\n--- Caption tal cual se enviaria ---")
         print(caption)
         return 0
 
     # --- publicacion real ----------------------------------------------
     token = _env("META_TOKEN")
-    ig_id = _env("IG_USER_ID")
-    page_id = _env("FB_PAGE_ID")
+    ig_id = _ig_id()
+    page_id = _env("FB_PAGE_ID") if meta.PUBLISHES_TO_FACEBOOK else None
 
     try:
         used = meta.publishing_limit(ig_id, token)
@@ -189,12 +212,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         # Si Facebook falla, Instagram ya esta publicado. Se registra igual para
         # no perder el ID y que un reintento no duplique el post de Instagram.
-        try:
-            fb_post_id = meta.publish_facebook(page_id, token, urls, caption)
-            print(f"[OK]   Facebook publicado: {fb_post_id}")
-        except meta.MetaError as exc:
-            fb_post_id = "ERROR"
-            print(f"[WARN] Instagram OK pero Facebook fallo: {exc}", file=sys.stderr)
+        if page_id:
+            try:
+                fb_post_id = meta.publish_facebook(page_id, token, urls, caption)
+                print(f"[OK]   Facebook publicado: {fb_post_id}")
+            except meta.MetaError as exc:
+                fb_post_id = "ERROR"
+                print(f"[WARN] Instagram OK pero Facebook fallo: {exc}", file=sys.stderr)
+        else:
+            fb_post_id = None
     except meta.MetaError as exc:
         _fail(str(exc))
 
@@ -203,6 +229,40 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Calendario actualizado: {row.ref} -> {agenda.PUBLISHED}")
 
     return 1 if fb_post_id == "ERROR" else 0
+
+
+# --------------------------------------------------------------------------
+# refresh-token
+# --------------------------------------------------------------------------
+
+def cmd_refresh_token(args: argparse.Namespace) -> int:
+    """Renueva el token de Instagram y lo escribe en un fichero.
+
+    Nunca se imprime por pantalla: la salida de Actions queda guardada y un
+    token con permiso de publicacion en la cuenta del cliente no puede acabar
+    en un log. El workflow lee el fichero y lo mete en el secret.
+    """
+    if meta.PUBLISHES_TO_FACEBOOK:
+        _fail("la ruta `facebook` usa token de System User, que no caduca: nada que renovar")
+
+    token = _env("META_TOKEN")
+    try:
+        data = meta.refresh_long_lived_token(token)
+    except meta.MetaError as exc:
+        _fail(f"no se pudo renovar el token: {exc}")
+
+    new_token = data.get("access_token")
+    if not new_token:
+        _fail(f"Meta no devolvio access_token (respuesta: {sorted(data)})")
+
+    days = int(data.get("expires_in", 0)) // 86400
+    out = Path(args.out)
+    out.write_text(new_token, encoding="utf-8")
+    print(f"[OK]   token renovado, caduca en {days} dias")
+    print(f"[OK]   escrito en {out}")
+    if days < 10:
+        print("[WARN] menos de 10 dias de margen; revisa que el cron se este ejecutando")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -224,6 +284,14 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--client-prefix", default="cliente")
     p_run.add_argument("--dry-run", action="store_true")
     p_run.set_defaults(func=cmd_run)
+
+    p_tok = sub.add_parser(
+        "refresh-token", help="renueva el token de Instagram (ruta instagram)"
+    )
+    p_tok.add_argument(
+        "--out", required=True, help="fichero donde escribir el token nuevo"
+    )
+    p_tok.set_defaults(func=cmd_refresh_token)
 
     args = parser.parse_args(argv)
     return args.func(args)

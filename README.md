@@ -7,6 +7,24 @@ clientes, sin que los datos de ninguno vivan en este repositorio.
 Usa la **Graph API oficial de Meta**. No hay automatización de navegador ni
 login con usuario y contraseña, que es lo que hace que Instagram bloquee cuentas.
 
+## Dos rutas
+
+Se elige con `META_ROUTE`. Cambia el host, el tipo de token y si se publica o no
+en Facebook; los endpoints de publicación en Instagram son idénticos.
+
+| | `instagram` (por defecto) | `facebook` |
+|---|---|---|
+| Host | `graph.instagram.com` | `graph.facebook.com` |
+| Login | Business Login for Instagram | System User del portfolio |
+| ¿Página de Facebook? | **No hace falta** | Obligatoria, con *Control total* |
+| Publica en | Solo Instagram | Instagram + Página |
+| Token | De usuario, **caduca a los 60 días** (renovable) | No caduca |
+| `IG_USER_ID` | Opcional (`me` si no se indica) | Obligatorio |
+
+La ruta `instagram` existe porque conseguir *Control total* de una Página ajena
+puede ser un trámite imposible: si la creó otra persona y no responde, la ruta
+`facebook` se queda bloqueada para siempre. A cambio hay que renovar el token.
+
 ## Cómo funciona
 
 ```
@@ -17,7 +35,8 @@ validate.py             →  JPEG, ratio 0.8–1.91, 2–10 slides, caption ≤ 
 r2.py                   →  slides a Cloudflare R2 → URLs públicas temporales
       ↓
 meta.py                 →  IG: contenedores hijo → carrusel → media_publish
-                           FB: /photos published=false → /feed attached_media
+                           FB (solo ruta `facebook`):
+                           /photos published=false → /feed attached_media
       ↓
 _calendario.md          →  `publicado` + IDs de la API (idempotencia)
 ```
@@ -61,6 +80,10 @@ python -m publisher.publish check
 
 # Publica como mucho un post vencido.
 python -m publisher.publish run --client-prefix invin [--dry-run]
+
+# Renueva el token de la ruta `instagram` y lo escribe en un fichero.
+# No lo imprime nunca: iría a parar al log de Actions.
+python -m publisher.publish refresh-token --out token.txt
 ```
 
 ## Formato del calendario
@@ -87,9 +110,11 @@ Cada carpeta de post necesita:
 
 | Variable | Para qué |
 |---|---|
-| `META_TOKEN` | Token de System User (no caduca) |
-| `IG_USER_ID` | ID de la cuenta profesional de Instagram |
-| `FB_PAGE_ID` | ID de la Página de Facebook |
+| `META_ROUTE` | `instagram` (por defecto) o `facebook` |
+| `META_TOKEN` | Token de usuario de Instagram, o de System User en la ruta `facebook` |
+| `IG_USER_ID` | ID de la cuenta de Instagram. Opcional en la ruta `instagram` |
+| `FB_PAGE_ID` | ID de la Página. **Solo** ruta `facebook` |
+| `GH_PAT` | Solo para `mode: refresh` en Actions: PAT con permiso de escritura sobre secrets |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_PUBLIC_URL` | Cloudflare R2 |
 | `GRAPH_VERSION` | Opcional, por defecto `v23.0` |
 
@@ -105,6 +130,11 @@ token de un cliente no puede alcanzar la cuenta de otro.
   publicar en ambas explícitamente.
 - Las **Stories** se pueden publicar por API, pero no se les pueden añadir
   stickers interactivos (encuestas, quiz), así que no están cubiertas aquí.
+- En la ruta `instagram`, el token **caduca a los 60 días**. Solo se puede
+  renovar si tiene más de 24 h y no ha caducado todavía; pasados los 60 días sin
+  renovar hay que repetir el login a mano. De ahí el cron quincenal de
+  `refresh`: tienen que fallar tres renovaciones seguidas, mes y medio sin que
+  nadie mire los emails en rojo, para llegar a perder el token.
 
 ## Licencia
 

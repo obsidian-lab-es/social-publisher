@@ -106,7 +106,7 @@ def due_rows(rows: list[Row], now: datetime | None = None) -> list[Row]:
     return sorted((r for r in rows if r.is_due(now)), key=lambda r: r.when)
 
 
-def mark_published(path: Path, row: Row, ig_id: str, fb_id: str) -> None:
+def mark_published(path: Path, row: Row, ig_id: str, fb_id: str | None = None) -> None:
     """Reescribe la fila como `publicado` y le anota los IDs de la API.
 
     Es lo que hace el sistema idempotente: una vez escrito esto, la fila deja
@@ -115,14 +115,16 @@ def mark_published(path: Path, row: Row, ig_id: str, fb_id: str) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
     cells = list(row.raw_cells)
     cells[_COL_ESTADO] = PUBLISHED
-    cells[_COL_IDS] = f"ig:{ig_id} fb:{fb_id}"
+    # Sin ruta de Facebook no hay ID que anotar; mejor dejarlo fuera que
+    # escribir `fb:-` en todas las filas y que parezca un fallo.
+    cells[_COL_IDS] = f"ig:{ig_id}" + (f" fb:{fb_id}" if fb_id else "")
     lines[row.lineno] = "| " + " | ".join(cells) + " |"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def append_log(path: Path, row: Row, ig_id: str, fb_id: str) -> None:
+def append_log(path: Path, row: Row, ig_id: str, fb_id: str | None = None) -> None:
     """Rastro append-only, independiente del calendario, por si este se edita mal."""
     stamp = datetime.now(MADRID).isoformat(timespec="seconds")
-    line = f"{stamp}\t{row.slug}\tig:{ig_id}\tfb:{fb_id}\n"
+    line = f"{stamp}\t{row.slug}\tig:{ig_id}" + (f"\tfb:{fb_id}" if fb_id else "") + "\n"
     with path.open("a", encoding="utf-8") as fh:
         fh.write(line)
