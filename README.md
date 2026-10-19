@@ -150,6 +150,21 @@ GEMINI_API_KEY=... AR=4:5 MODEL=gemini-3-pro-image-preview   python tools/gen_im
 `COST_LOG` elige donde se acumula el CSV de costes; por defecto, junto al
 script. Ninguna clave va escrita en el codigo.
 
+## `tools/gen_slides.py`
+
+Convierte los `prompts/NN-*.txt` de un post en sus `slides/NN.jpg`, llamando a
+`gen_img.py` con las referencias que toque para cada slide. Las referencias y el
+formato vienen de un JSON del repo del cliente, asi que el script no sabe nada
+de ninguna marca.
+
+```bash
+python tools/gen_slides.py --post 2026-10-O-tema --refs assets/referencias/mapa.json
+```
+
+No regenera una slide que ya existe salvo con `--force`: generar cuesta dinero y
+la revision manual puede haber aprobado ya el resto del carrusel. `--slide 01`
+regenera una sola, que es el caso normal cuando sale con una errata.
+
 ## Licencia
 
 MIT
