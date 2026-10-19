@@ -136,6 +136,20 @@ token de un cliente no puede alcanzar la cuenta de otro.
   `refresh`: tienen que fallar tres renovaciones seguidas, mes y medio sin que
   nadie mire los emails en rojo, para llegar a perder el token.
 
+## `tools/gen_img.py`
+
+Genera una imagen con Gemini a partir de un prompt y N imagenes de referencia.
+Vive aqui, y no en el repo de cada cliente, porque es generico: lo que cambia
+entre clientes son los prompts y las referencias de marca, que son privados y se
+quedan en su repo.
+
+```bash
+GEMINI_API_KEY=... AR=4:5 MODEL=gemini-3-pro-image-preview   python tools/gen_img.py salida.jpg prompt.txt logo.png ref1.png ref2.png
+```
+
+`COST_LOG` elige donde se acumula el CSV de costes; por defecto, junto al
+script. Ninguna clave va escrita en el codigo.
+
 ## Licencia
 
 MIT
