@@ -165,6 +165,74 @@ No regenera una slide que ya existe salvo con `--force`: generar cuesta dinero y
 la revision manual puede haber aprobado ya el resto del carrusel. `--slide 01`
 regenera una sola, que es el caso normal cuando sale con una errata.
 
+## `inbox/` — capa de interacción
+
+Responder DMs y comentarios, con **aprobación humana obligatoria**. Módulo
+aparte de `publisher/` porque publicar y conversar no se parecen: publicar es un
+cron semanal e idempotente, conversar tiene ventanas de horas y un error se lee
+como si lo hubiera escrito el cliente.
+
+```bash
+# Comprueba las reglas de ventana y la cola. Sin red, sin token.
+python -m inbox.cli selftest
+
+# Prueba el flujo entero con datos simulados, sin cuenta de Meta.
+python -m inbox.cli pull --demo --bandeja _bandeja.md --playbook respuestas.md
+
+# Verifica que el token trae manage_messages, manage_comments y manage_insights.
+python -m inbox.cli check
+
+# Lee DMs y comentarios nuevos y escribe borradores en la bandeja.
+python -m inbox.cli pull
+
+# Envía SOLO lo que una persona ha marcado como `aprobado`.
+python -m inbox.cli send --dry-run
+```
+
+**El bot redacta, la persona aprueba.** `pull` escribe bloques en `_bandeja.md`
+con estado `pendiente`. Nada sale hasta que alguien lo cambia a `aprobado` a
+mano, igual que el calendario solo publica filas en `programado`. Es el mismo
+invariante y por la misma razón: un fichero mal editado no puede disparar
+mensajes en la cuenta de un cliente.
+
+**Borradores por plantilla, no por modelo.** Salen de `respuestas.md`, que
+escribe el cliente. En inmobiliaria «sí, sigue disponible» dicho por un bot es
+una promesa que alguien tiene que sostener, y un modelo acierta *casi* siempre.
+Lo que no encaja en ninguna entrada se marca `[ESCRIBIR A MANO]` y `send` se
+niega a enviarlo aunque esté aprobado. El hueco para un modelo está pensado para
+después: reformular una plantilla ya aprobada, no elegir qué se dice.
+
+**La ventana se comprueba dos veces**, en `pull` y otra vez en `send`: entre
+redactar y aprobar pueden pasar días, y enviar fuera de plazo es un error de la
+API, no un mensaje que llega tarde.
+
+**Comentario → DM.** Para convertir una respuesta pública en mensaje privado,
+se cambia `Tipo: comment` por `Tipo: private_reply` en la bandeja. Es la única
+vía legítima de iniciar un DM, y el libro de envíos (`_bandeja.log`) es lo único
+que recuerda que ya se gastó: Meta permite **una sola** por comentarista y no
+avisa.
+
+## Límites de Meta en mensajes y comentarios
+
+Verificados en la documentación oficial el 23 oct 2026:
+
+- **La conversación la inicia siempre el usuario.** No existe endpoint para
+  escribir primero a un seguidor nuevo. El *Follow to DM* de ManyChat es una
+  capacidad de partner en beta que Meta concede cuenta por cuenta; no está en la
+  API pública.
+- **Ventana de 24 h** para responder un DM, ampliable a **7 días** con la
+  etiqueta `HUMAN_AGENT`, que es la que usa este módulo: el ciclo de aprobación
+  humana no siempre cabe en un día.
+- **Respuesta privada a un comentario: 7 días** y **un único mensaje por
+  comentarista**. En un Live, solo durante la emisión.
+- **Seguimiento** tras una respuesta privada: solo si la persona contesta, y
+  dentro de las 24 h siguientes.
+- **Cuentas de terceros exigen Advanced Access**, que es App Review +
+  Verificación de negocio. Y si el revisor no puede probar la app (sin interfaz,
+  sin *Facebook Login for Business*) solo aprueban `instagram_basic` e
+  `instagram_manage_comments`: **sin mensajes**. Automatizar DMs para clientes
+  que no son propios necesita, por tanto, una interfaz mínima revisable.
+
 ## Licencia
 
 MIT

@@ -1,0 +1,140 @@
+name: inbox
+
+# Workflow reutilizable para la capa de interaccion, hermano de `publish.yml`.
+# Mismo reparto: el motor trae el codigo, el repo del cliente trae los datos y
+# los secrets.
+#
+# Dos diferencias con `publish.yml`, y las dos vienen de las ventanas de Meta:
+#
+# 1. **Cadencia**: publicar es semanal; contestar tiene ventanas de 24 h (o de 7
+#    dias con etiqueta HUMAN_AGENT). El cron del cliente llama a `pull` varias
+#    veces al dia, no una vez al mes.
+# 2. **`send` no decide nada**. Solo saca lo que una persona ha marcado como
+#    `aprobado` en `_bandeja.md`. Sin ese paso humano no sale ningun mensaje.
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: '"pull" lee y redacta, "send" envia lo aprobado, "check" permisos, "selftest" reglas'
+        type: string
+        default: pull
+      dry_run:
+        description: Si es true, no escribe en la bandeja ni llama a Meta para enviar
+        type: boolean
+        default: true
+      bandeja:
+        type: string
+        default: _bandeja.md
+      playbook:
+        description: Guion de respuestas del cliente
+        type: string
+        default: respuestas.md
+      ledger:
+        description: Libro de envios. Es lo unico que recuerda las respuestas privadas gastadas
+        type: string
+        default: _bandeja.log
+      posts:
+        description: Cuantas publicaciones recientes revisar en busca de comentarios
+        type: number
+        default: 5
+      engine_ref:
+        type: string
+        default: main
+    secrets:
+      META_TOKEN: {required: false}
+      IG_USER_ID: {required: false}
+
+jobs:
+  inbox:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # para guardar la bandeja y el libro de envios
+    # Dos pasadas simultaneas podrian encolar el mismo DM dos veces o, peor,
+    # enviar dos respuestas al mismo aprobado.
+    concurrency:
+      group: inbox-${{ github.repository }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout de los datos del cliente
+        uses: actions/checkout@v4
+
+      - name: Checkout del motor
+        uses: actions/checkout@v4
+        with:
+          repository: obsidian-lab-es/social-publisher
+          ref: ${{ inputs.engine_ref }}
+          path: .engine
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .engine/requirements.txt
+
+      - run: pip install -r .engine/requirements.txt
+
+      # No necesita token ni red: comprueba las reglas de ventana y la cola.
+      # Corre siempre antes de cualquier modo que pueda enviar algo.
+      - name: Comprobar las reglas (selftest)
+        if: ${{ inputs.mode != 'check' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+        run: python -m inbox.cli selftest
+
+      - name: Comprobar permisos del token
+        if: ${{ inputs.mode == 'check' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: python -m inbox.cli check
+
+      - name: Leer DMs y comentarios y redactar borradores
+        if: ${{ inputs.mode == 'pull' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          python -m inbox.cli pull \
+            --bandeja "${{ inputs.bandeja }}" \
+            --playbook "${{ inputs.playbook }}" \
+            --posts "${{ inputs.posts }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      # Sale con codigo 1 si algo se ha quedado sin enviar (ventana cerrada, o
+      # un borrador que sigue marcado para escribir a mano). Eso es a proposito:
+      # mientras no haya notificaciones propias, un workflow en rojo es el aviso
+      # de que hay algo esperando en la bandeja.
+      - name: Enviar lo aprobado
+        if: ${{ inputs.mode == 'send' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          python -m inbox.cli send \
+            --bandeja "${{ inputs.bandeja }}" \
+            --ledger "${{ inputs.ledger }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      # `always()` por la misma razon que en `publish.yml`: si un envio sale y el
+      # siguiente falla, el estado del que salio YA esta escrito. Perder eso
+      # significaria volver a enviarlo en la pasada siguiente.
+      - name: Guardar bandeja y libro de envios
+        if: ${{ always() && inputs.mode != 'selftest' && inputs.mode != 'check' && !inputs.dry_run }}
+        run: |
+          if git diff --quiet; then
+            echo "Sin cambios que guardar."
+            exit 0
+          fi
+          git config user.name "social-publisher[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(inbox): actualiza bandeja y libro de envios [skip ci]"
+          git push
