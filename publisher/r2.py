@@ -9,6 +9,8 @@ mientras se publica.
 from __future__ import annotations
 
 import os
+import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,3 +79,25 @@ class R2:
             )
             urls.append(f"{self.public_base}/{key}")
         return urls
+
+    def roundtrip(self) -> str:
+        """Sube un fichero de prueba, lo lee por la URL publica y lo borra.
+
+        Es lo mismo que hara Meta al publicar, sin necesitar su token: si esto
+        pasa, R2 esta bien configurado. Devuelve la URL probada.
+        """
+        s3 = self._client()
+        key = "_check/roundtrip.txt"
+        body = f"social-publisher check {time.time()}".encode()
+        s3.put_object(Bucket=self.bucket, Key=key, Body=body, ContentType="text/plain")
+        url = f"{self.public_base}/{key}"
+        try:
+            # Sin User-Agent, r2.dev a veces responde 403 a urllib.
+            req = urllib.request.Request(url, headers={"User-Agent": "social-publisher"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                got = resp.read()
+            if got != body:
+                raise RuntimeError(f"{url} devuelve otro contenido; ¿R2_PUBLIC_URL es de otro bucket?")
+        finally:
+            s3.delete_object(Bucket=self.bucket, Key=key)
+        return url

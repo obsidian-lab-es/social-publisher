@@ -99,6 +99,22 @@ def cmd_validate(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 def cmd_check(args: argparse.Namespace) -> int:
+    # R2 va primero y no aborta: se puede probar antes de tener token de Meta.
+    r2_failed = False
+    try:
+        r2 = R2.from_env()
+        url = r2.roundtrip()
+        print(f"[OK]   R2: bucket={r2.bucket}, subida y lectura publica en {url}")
+    except R2NotConfigured as exc:
+        print(f"[WARN] R2 sin configurar: {exc}")
+    except Exception as exc:  # boto3 y urllib lanzan cada uno los suyos
+        print(f"[FAIL] R2: {exc}", file=sys.stderr)
+        r2_failed = True
+
+    if not os.environ.get("META_TOKEN"):
+        print("[INFO] Sin META_TOKEN: solo se ha comprobado R2")
+        return 1 if r2_failed else 0
+
     token = _env("META_TOKEN")
     ig_id = _ig_id()
 
@@ -117,13 +133,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     except meta.MetaError as exc:
         _fail(str(exc))
 
-    try:
-        r2 = R2.from_env()
-        print(f"[OK]   R2 configurado: bucket={r2.bucket} base={r2.public_base}")
-    except R2NotConfigured as exc:
-        print(f"[WARN] R2 sin configurar: {exc}")
-
-    return 0
+    return 1 if r2_failed else 0
 
 
 # --------------------------------------------------------------------------
