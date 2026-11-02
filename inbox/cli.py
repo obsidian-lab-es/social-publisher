@@ -5,7 +5,9 @@ Cuatro subcomandos, en el mismo orden en que se usan:
     selftest  comprueba las reglas de ventana y la cola. No toca la red ni Meta.
     check     verifica que el token tiene los permisos de mensajes y comentarios.
     pull      lee DMs y comentarios nuevos y escribe borradores en `_bandeja.md`.
-    send      envia SOLO lo que una persona ha marcado como `aprobado`.
+    send      envia SOLO lo que una persona ha marcado como `aprobado`
+              (y oculta los comentarios marcados `ocultar`).
+    metrics   escribe `_metricas.md`: alcance de la cuenta y numeros por post.
 
 `pull` y `send` aceptan `--dry-run`, y `pull` acepta `--demo` para trabajar con
 datos simulados: el modulo entero se puede probar de punta a punta sin token,
@@ -45,6 +47,27 @@ def _ig_id() -> str:
     """Igual que en el publisher: en la ruta `instagram` el token ya dice quien es."""
     value = (os.environ.get("IG_USER_ID") or "").strip()
     return value or "me"
+
+
+class Identity:
+    """Quien somos: para no encolar respuestas a lo que hemos escrito nosotros."""
+
+    def __init__(self, ids: set[str], username: str) -> None:
+        self.ids = {i for i in ids if i}
+        self.username = username.lstrip("@").lower()
+
+    def is_us(self, sender_id: object, username: object = "") -> bool:
+        if sender_id and str(sender_id) in self.ids:
+            return True
+        return bool(self.username) and str(username or "").lstrip("@").lower() == self.username
+
+
+def _identity(ig_id: str, token: str, demo: bool) -> Identity:
+    if demo:
+        return Identity({fixtures.DEMO_IG_ID}, fixtures.DEMO_USERNAME)
+    me = meta.fetch_self(token)
+    ids = set(me["ids"].split(",")) | ({ig_id} if ig_id != "me" else set())
+    return Identity(ids, me["username"])
 
 
 def _parse_api_time(value: str) -> datetime:
@@ -199,6 +222,64 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         text, reason = draft.draft_for("hola", [])
         check("sin guion, todo a mano", draft.NEEDS_HUMAN in text)
 
+    # --- identidad y filtros de pull ----------------------------------
+    us = Identity({"17841499999999999", "me"}, "@Cuenta_Demo")
+    check("reconoce nuestro id numerico", us.is_us("17841499999999999"))
+    check("reconoce nuestro @ sin importar mayusculas", us.is_us("", "cuenta_demo"))
+    check("un tercero no es nosotros", not us.is_us("17841400000000001", "otra"))
+
+    convs = [
+        {"id": "c1", "messages": {"data": [
+            {"id": "m1", "created_time": "2026-10-23T09:00:00+0000",
+             "from": {"id": "17841499999999999", "username": "cuenta_demo"}, "message": "hecho"}]}},
+    ]
+    check(
+        "un DM cuyo ultimo mensaje es nuestro no se encola (id numerico, no 'me')",
+        _items_from_conversations(convs, us, now, []) == [],
+    )
+
+    def _one_comment(c: dict) -> list:
+        orig = fixtures.comments_for
+        fixtures.comments_for = lambda _id: [c]
+        try:
+            return _items_from_comments([{"id": "p1"}], "DEMO", now, [], True, us)
+        finally:
+            fixtures.comments_for = orig
+
+    base = {"id": "k1", "text": "hola", "timestamp": "2026-10-23T09:00:00+0000",
+            "username": "alguien", "from": {"id": "1"}}
+    check("comentario ajeno sin contestar: se encola", len(_one_comment(base)) == 1)
+    check("comentario nuestro: no se encola", _one_comment({**base, "username": "cuenta_demo"}) == [])
+    check("comentario oculto: no se encola", _one_comment({**base, "hidden": True}) == [])
+    check(
+        "comentario ya contestado por nosotros en el hilo: no se encola",
+        _one_comment({**base, "replies": {"data": [{"id": "r", "username": "cuenta_demo"}]}}) == [],
+    )
+
+    tags = _items_from_tags([{"id": "t1", "username": "fan", "timestamp": "2026-10-23T09:00:00+0000",
+                              "permalink": "https://instagram.com/p/X", "caption": "Mi casa nueva"}])
+    check("una mencion entra como aviso, nunca como aprobable", tags[0].estado == queue.NOTICE)
+    check("la mencion lleva el enlace al post", "instagram.com/p/X" in tags[0].render())
+
+    # --- ocultar ------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        bandeja = Path(tmp) / "_bandeja.md"
+        spam = queue.Item(id="comment:k9", kind="comment", author="@spam", author_id="9",
+                          received=now, closes=None, estado=queue.HIDE, said="GANA", draft="")
+        queue.append_items(bandeja, [spam])
+        parsed = queue.parse(bandeja)
+        check("'ocultar' se lee como ocultar", len(queue.to_hide(parsed)) == 1)
+        check("'ocultar' no cuenta como aprobado para enviar", queue.approved(parsed) == [])
+
+    # --- metricas -----------------------------------------------------
+    report = render_metrics(now, {"reach": 1200, "views": "error: x"}, {}, [
+        ({"timestamp": "2026-10-20T09:00:00+0000", "caption": "Titulo | con barra",
+          "permalink": "https://instagram.com/p/Y"}, {"reach": 300, "likes": 12}),
+    ])
+    check("el informe pone los miles con punto", "1.200" in report)
+    check("una metrica con error sale como guion, no como error", "error" not in report)
+    check("una barra en el titulo no rompe la tabla", "Titulo / con barra" in report)
+
     # --- parseo de fechas de la API ------------------------------------
     check(
         "fecha de Meta sin dos puntos en el offset",
@@ -230,7 +311,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     for label, fn in (
         ("mensajes (manage_messages)", lambda: meta.fetch_conversations(ig_id, token, limit=1)),
         ("publicaciones (basic)", lambda: meta.fetch_media(ig_id, token, limit=1)),
-        ("metricas (manage_insights)", lambda: meta.fetch_insights(ig_id, token)),
     ):
         try:
             data = fn()
@@ -238,6 +318,25 @@ def cmd_check(args: argparse.Namespace) -> int:
         except meta.MetaError as exc:
             problems += 1
             print(f"[FAIL] {label}: {exc}", file=sys.stderr)
+
+    # Las metricas se piden una a una: se avisa de cada una que falle, pero solo
+    # es un fallo del permiso si fallan todas.
+    insights = meta.fetch_insights(ig_id, token)
+    broken = {k: v for k, v in insights.items() if isinstance(v, str) and v.startswith("error")}
+    if len(broken) == len(insights):
+        problems += 1
+        print(f"[FAIL] metricas (manage_insights): {next(iter(broken.values()))}", file=sys.stderr)
+    else:
+        print(f"[OK]   metricas (manage_insights): {len(insights) - len(broken)}/{len(insights)} disponibles")
+        for name, value in broken.items():
+            print(f"[WARN] metrica {name}: {value}")
+
+    try:
+        me = meta.fetch_self(token)
+        print(f"[OK]   identidad: @{me['username']} (ids {me['ids']})")
+    except meta.MetaError as exc:
+        problems += 1
+        print(f"[FAIL] identidad (/me): {exc}", file=sys.stderr)
 
     # Los comentarios solo se pueden comprobar si hay alguna publicacion.
     try:
@@ -259,7 +358,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 def _items_from_conversations(
-    conversations: list[dict], ig_id: str, now: datetime, entries: list[draft.Entry]
+    conversations: list[dict], us: Identity, now: datetime, entries: list[draft.Entry]
 ) -> list[queue.Item]:
     """Convierte conversaciones de la API en items pendientes.
 
@@ -274,7 +373,7 @@ def _items_from_conversations(
         # La API los devuelve del mas reciente al mas antiguo.
         last = messages[0]
         sender = (last.get("from") or {})
-        if sender.get("id") in ("", None) or sender.get("id") == ig_id:
+        if sender.get("id") in ("", None) or us.is_us(sender.get("id"), sender.get("username")):
             continue
 
         received = _parse_api_time(last.get("created_time", ""))
@@ -300,8 +399,15 @@ def _items_from_conversations(
 
 
 def _items_from_comments(
-    media: list[dict], token: str, now: datetime, entries: list[draft.Entry], demo: bool
+    media: list[dict], token: str, now: datetime, entries: list[draft.Entry], demo: bool,
+    us: Identity,
 ) -> list[queue.Item]:
+    """Comentarios ajenos sin contestar.
+
+    Se saltan tres casos: los nuestros, los ya ocultos y los que ya tienen una
+    respuesta nuestra en el hilo (contestados a mano desde el movil, por
+    ejemplo). Sin lo ultimo, la bandeja se llenaria de cosas ya resueltas.
+    """
     items: list[queue.Item] = []
     for post in media:
         comments = (
@@ -309,6 +415,13 @@ def _items_from_comments(
         )
         for comment in comments:
             author = (comment.get("from") or {})
+            if us.is_us(author.get("id"), comment.get("username")):
+                continue
+            if comment.get("hidden") in (True, "true"):
+                continue
+            replies = (comment.get("replies") or {}).get("data") or []
+            if any(us.is_us((r.get("from") or {}).get("id"), r.get("username")) for r in replies):
+                continue
             received = _parse_api_time(comment.get("timestamp", ""))
             text = comment.get("text", "") or ""
             body, reason = draft.draft_for(text, entries)
@@ -331,6 +444,34 @@ def _items_from_comments(
     return items
 
 
+def _items_from_tags(tags: list[dict]) -> list[queue.Item]:
+    """Menciones: posts de otros que etiquetan a la cuenta. Solo para leer.
+
+    No se pueden contestar desde la API en esta ruta, pero merece la pena
+    verlas: un cliente contento ensenando su casa es contenido para compartir.
+    """
+    items: list[queue.Item] = []
+    for tag in tags:
+        items.append(
+            queue.Item(
+                id=f"mention:{tag.get('id')}",
+                kind="mention",
+                author="@" + str(tag.get("username") or "?"),
+                author_id="",
+                received=_parse_api_time(tag.get("timestamp", "")),
+                closes=None,
+                estado=queue.NOTICE,
+                said=(tag.get("caption") or "").strip(),
+                draft=(
+                    "(Mencion: no se contesta desde aqui. Abre el enlace y, si vale "
+                    "la pena, compartela en stories.)"
+                ),
+                extra={"motivo": "mencion", "post": str(tag.get("permalink") or tag.get("id"))},
+            )
+        )
+    return items
+
+
 def cmd_pull(args: argparse.Namespace) -> int:
     bandeja = Path(args.bandeja)
     entries = draft.load_playbook(Path(args.playbook))
@@ -346,6 +487,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
         print("[INFO] modo demo: datos simulados, no se llama a Meta")
         conversations = fixtures.conversations(now)
         media = fixtures.media()
+        tags = fixtures.tags(now)
         token = "DEMO"
     else:
         token = _env("META_TOKEN")
@@ -354,9 +496,17 @@ def cmd_pull(args: argparse.Namespace) -> int:
             media = meta.fetch_media(ig_id, token, limit=args.posts)
         except meta.MetaError as exc:
             _fail(str(exc))
+        # Las menciones son lo menos importante: si fallan, se avisa y se sigue.
+        try:
+            tags = meta.fetch_tags(ig_id, token)
+        except meta.MetaError as exc:
+            print(f"[WARN] no se pudieron leer las menciones: {exc}")
+            tags = []
 
-    items = _items_from_conversations(conversations, ig_id, now, entries)
-    items += _items_from_comments(media, token, now, entries, args.demo)
+    us = _identity(ig_id, token, args.demo)
+    items = _items_from_conversations(conversations, us, now, entries)
+    items += _items_from_comments(media, token, now, entries, args.demo, us)
+    items += _items_from_tags(tags)
 
     nuevos = [i for i in items if i.id not in queue.known_ids(bandeja)]
     print(f"DMs y comentarios leidos: {len(items)} | nuevos: {len(nuevos)}")
@@ -374,6 +524,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
     if written:
         print("Revisa los borradores y cambia 'Estado: pendiente' por 'aprobado'")
         print("Para contestar por DM a un comentario, cambia 'Tipo: comment' por 'private_reply'")
+        print("Para un comentario de spam, pon 'Estado: ocultar'")
     return 0
 
 
@@ -387,11 +538,41 @@ def cmd_send(args: argparse.Namespace) -> int:
     now = datetime.now(MADRID)
     ig_id = _ig_id()
 
-    items = queue.approved(queue.parse(bandeja))
-    print(f"Aprobados en la bandeja: {len(items)}")
-    if not items:
+    parsed = queue.parse(bandeja)
+    items = queue.approved(parsed)
+    hide = queue.to_hide(parsed)
+    print(f"Aprobados en la bandeja: {len(items)} | para ocultar: {len(hide)}")
+    if not items and not hide:
         print("Nada que enviar. Salida limpia.")
         return 0
+
+    token = None if args.dry_run else _env("META_TOKEN")
+    problems = 0
+
+    # Ocultar va primero y no cuenta para el limite de rafaga: no es un mensaje
+    # a nadie, y el spam cuanto antes desaparezca mejor.
+    for item in hide:
+        if item.kind not in ("comment", "private_reply"):
+            problems += 1
+            print(f"[SKIP] {item}: solo se pueden ocultar comentarios")
+            continue
+        comment_id = item.id.split(":", 1)[1]
+        if args.dry_run:
+            print(f"[DRY]  ocultar comentario de {item.author}")
+            continue
+        try:
+            meta.hide_comment(comment_id, token)
+        except meta.MetaError as exc:
+            problems += 1
+            print(f"[FAIL] ocultar {item}: {exc}", file=sys.stderr)
+            queue.set_estado(bandeja, item.id, queue.FAILED, note=str(exc)[:200])
+            continue
+        queue.set_estado(bandeja, item.id, queue.HIDDEN)
+        queue.append_ledger(ledger, item, "ok:oculto")
+        print(f"[OK]   comentario de {item.author} oculto")
+
+    if not items:
+        return 1 if problems else 0
 
     batch = items[: queue.MAX_SEND_PER_RUN]
     if len(items) > queue.MAX_SEND_PER_RUN:
@@ -399,9 +580,6 @@ def cmd_send(args: argparse.Namespace) -> int:
             f"[WARN] {len(items)} aprobados; envio solo {len(batch)} en esta pasada "
             "para no parecer un bot"
         )
-
-    token = None if args.dry_run else _env("META_TOKEN")
-    problems = 0
 
     for item in batch:
         # La ventana se vuelve a comprobar aqui, no solo en `pull`: entre que se
@@ -413,6 +591,10 @@ def cmd_send(args: argparse.Namespace) -> int:
             verdict = windows.can_private_reply(item.received, now, already_replied=gastada)
         elif item.kind == "comment":
             verdict = windows.can_reply_comment(item.received, now)
+        elif item.kind == "mention":
+            verdict = windows.Verdict(
+                False, "las menciones no se contestan por API; pon 'aviso' o 'descartado'"
+            )
         else:
             verdict = windows.Verdict(False, f"tipo desconocido: {item.kind!r}")
 
@@ -457,6 +639,98 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# metrics
+# --------------------------------------------------------------------------
+
+METRIC_LABELS = {
+    "reach": "Cuentas alcanzadas",
+    "views": "Visualizaciones",
+    "accounts_engaged": "Cuentas que interactuaron",
+    "total_interactions": "Interacciones",
+    "profile_links_taps": "Toques en enlaces del perfil",
+    "follows_and_unfollows": "Seguidores ganados (neto)",
+}
+
+
+def _cell(value: object) -> str:
+    if isinstance(value, int):
+        return f"{value:,}".replace(",", ".")
+    return "—" if not value or str(value).startswith(("error", "sin dato")) else str(value)
+
+
+def render_metrics(
+    now: datetime,
+    week: dict[str, object],
+    month: dict[str, object],
+    posts: list[tuple[dict, dict[str, object]]],
+) -> str:
+    """El informe de `_metricas.md`. Funcion pura para poder probarla en seco."""
+    lines = [
+        "# Metricas",
+        "",
+        f"> Lo genera el bot, no se edita a mano. Actualizado: {now:%Y-%m-%d %H:%M}.",
+        "> Un `—` es una metrica que Meta no ha devuelto (cuenta pequena, post",
+        "> muy reciente o metrica retirada).",
+        "",
+        "## Cuenta",
+        "",
+        "| | Ultimos 7 dias | Ultimos 28 dias |",
+        "|---|---:|---:|",
+    ]
+    for key, label in METRIC_LABELS.items():
+        lines.append(f"| {label} | {_cell(week.get(key))} | {_cell(month.get(key))} |")
+
+    lines += [
+        "",
+        "## Ultimas publicaciones",
+        "",
+        "| Fecha | Post | Alcance | Visualiz. | Me gusta | Coment. | Guardados | Compartidos |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for post, ins in posts:
+        when = _parse_api_time(post.get("timestamp", "")).strftime("%Y-%m-%d") if post.get("timestamp") else "?"
+        title = (post.get("caption") or "").strip().splitlines()[0][:40] if post.get("caption") else "(sin texto)"
+        link = f"[{title.replace('|', '/')}]({post.get('permalink')})" if post.get("permalink") else title
+        lines.append(
+            f"| {when} | {link} | {_cell(ins.get('reach'))} | {_cell(ins.get('views'))} "
+            f"| {_cell(ins.get('likes'))} | {_cell(ins.get('comments'))} "
+            f"| {_cell(ins.get('saved'))} | {_cell(ins.get('shares'))} |"
+        )
+    if not posts:
+        lines.append("| | (sin publicaciones) | | | | | | |")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    now = datetime.now(MADRID)
+    ig_id = _ig_id()
+    until = int(now.timestamp())
+
+    if args.demo:
+        print("[INFO] modo demo: datos simulados, no se llama a Meta")
+        week, month = fixtures.insights(7), fixtures.insights(28)
+        posts = [(m, fixtures.media_insights(m["id"])) for m in fixtures.media()]
+    else:
+        token = _env("META_TOKEN")
+        try:
+            # Meta limita el rango a 30 dias por llamada; 28 cabe en una.
+            week = meta.fetch_insights(ig_id, token, since=until - 7 * 86400, until=until)
+            month = meta.fetch_insights(ig_id, token, since=until - 28 * 86400, until=until)
+            media = meta.fetch_media(ig_id, token, limit=args.posts)
+        except meta.MetaError as exc:
+            _fail(str(exc))
+        posts = [(m, meta.fetch_media_insights(m["id"], token)) for m in media]
+
+    report = render_metrics(now, week, month, posts)
+    if args.dry_run:
+        print(report)
+        return 0
+    Path(args.out).write_text(report, encoding="utf-8")
+    print(f"Escrito {args.out}: {len(posts)} publicaciones")
+    return 0
+
+
+# --------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="inbox", description=__doc__)
@@ -481,6 +755,13 @@ def main(argv: list[str] | None = None) -> int:
     p_send.add_argument("--ledger", default="_bandeja.log")
     p_send.add_argument("--dry-run", action="store_true")
     p_send.set_defaults(func=cmd_send)
+
+    p_met = sub.add_parser("metrics", help="escribe el informe de metricas")
+    p_met.add_argument("--out", default="_metricas.md")
+    p_met.add_argument("--posts", type=int, default=10)
+    p_met.add_argument("--demo", action="store_true", help="datos simulados, sin token")
+    p_met.add_argument("--dry-run", action="store_true")
+    p_met.set_defaults(func=cmd_metrics)
 
     args = parser.parse_args(argv)
     return args.func(args)

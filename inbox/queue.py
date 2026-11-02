@@ -28,6 +28,12 @@ APPROVED = "aprobado"
 SENT = "enviado"
 DISCARDED = "descartado"
 FAILED = "error"
+# Para comentarios: ocultarlo en vez de contestar (spam, faltas de respeto).
+# Ocultar es reversible y no avisa a nadie; borrar no se ofrece a proposito.
+HIDE = "ocultar"
+HIDDEN = "oculto"
+# Solo informativo (menciones): el bot nunca actua sobre un aviso.
+NOTICE = "aviso"
 
 # Rafaga maxima por ejecucion. El limite de Meta es mucho mas alto, pero diez
 # DMs seguidos desde una cuenta que normalmente contesta a mano se lee como un
@@ -47,6 +53,8 @@ CABECERA = """# Bandeja - pendiente de responder
 > - El bot **solo envia** bloques cuyo `Estado:` sea **`aprobado`**.
 > - Edita libremente el texto bajo `Borrador:` antes de aprobar.
 > - `descartado` se ignora para siempre; `pendiente` es lo que espera decision.
+> - En un comentario de spam, pon `ocultar`: se oculta (reversible) y no se contesta.
+> - `aviso` es solo para leer (menciones): el bot no hace nada con ellos.
 > - No toques las lineas `ID:`, `Tipo:`, `Recibido:` ni `Cierra:`.
 > - `Cierra:` es el limite de Meta para contestar. Pasado eso ya no se puede.
 """
@@ -81,12 +89,14 @@ class Item:
         if self.closes:
             cierra = "\n- Cierra: " + self.closes.strftime(STAMP)
         dijo = "\n".join(f"> {line}" for line in (self.said or "").splitlines())
+        # Sin el enlace, quien aprueba un comentario no sabe en que post esta.
+        post = f"\n- Post: {self.extra['post']}" if self.extra.get("post") else ""
         return (
             f"\n## {self.author} - {self.kind}\n"
             f"- ID: {self.id}\n"
             f"- Tipo: {self.kind}\n"
             f"- De: {self.author}\n"
-            f"- AuthorId: {self.author_id}\n"
+            f"- AuthorId: {self.author_id}{post}\n"
             f"- Recibido: {self.received.strftime(STAMP)}{cierra}\n"
             f"- Estado: {self.estado}\n\n"
             f"**Dijo:**\n{dijo or '> (sin texto)'}\n\n"
@@ -167,6 +177,11 @@ def known_ids(path: Path) -> set[str]:
 def approved(items: list[Item]) -> list[Item]:
     """Lo que la persona ha aprobado, de lo mas antiguo a lo mas nuevo."""
     return sorted((i for i in items if i.is_approved), key=lambda i: i.received)
+
+
+def to_hide(items: list[Item]) -> list[Item]:
+    """Comentarios que la persona ha marcado para ocultar."""
+    return sorted((i for i in items if i.estado == HIDE), key=lambda i: i.received)
 
 
 def append_items(path: Path, items: list[Item]) -> int:

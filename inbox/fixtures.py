@@ -24,6 +24,7 @@ from typing import Any
 # El id de la cuenta en la demo. Coincide con lo que `_ig_id()` devuelve por
 # defecto para que el filtro de "mensaje nuestro" se pueda probar.
 DEMO_IG_ID = "me"
+DEMO_USERNAME = "demo_cuenta"
 
 API_STAMP = "%Y-%m-%dT%H:%M:%S+0000"
 
@@ -118,6 +119,25 @@ def comments_for(media_id: str) -> list[dict[str, Any]]:
             "parent_id": "",
         },
         {
+            # Ya contestado por nosotros en el hilo: pull no debe volver a encolarlo.
+            "id": "comment_demo_3",
+            "text": "Que buen consejo, gracias",
+            "timestamp": _stamp(now - timedelta(days=1, hours=2)),
+            "username": "demo_agradecida",
+            "from": {"id": "17841400000000006"},
+            "parent_id": "",
+            "replies": {"data": [{"id": "reply_demo_1", "username": DEMO_USERNAME}]},
+        },
+        {
+            # Nuestro propio comentario (p. ej. fijado): nunca se encola.
+            "id": "comment_demo_4",
+            "text": "Si te ha servido, guardalo para luego",
+            "timestamp": _stamp(now - timedelta(days=2)),
+            "username": DEMO_USERNAME,
+            "from": {"id": DEMO_IG_ID},
+            "parent_id": "",
+        },
+        {
             "id": "comment_demo_2",
             "text": "GANA 5000 EUROS AL MES DESDE CASA, escribeme",
             "timestamp": _stamp(now - timedelta(hours=5)),
@@ -126,3 +146,36 @@ def comments_for(media_id: str) -> list[dict[str, Any]]:
             "parent_id": "",
         },
     ]
+
+
+def tags(now: datetime) -> list[dict[str, Any]]:
+    """Una publicacion ajena que etiqueta a la cuenta."""
+    return [
+        {
+            "id": "tag_demo_1",
+            "caption": "Primer dia en casa nueva, gracias por todo",
+            "timestamp": _stamp(now - timedelta(days=1)),
+            "permalink": "https://instagram.com/p/DEMOTAG",
+            "username": "demo_clienta_feliz",
+            "media_type": "IMAGE",
+        }
+    ]
+
+
+def insights(days: int) -> dict[str, int | str]:
+    """Metricas de cuenta inventadas, proporcionales al periodo."""
+    k = days / 7
+    return {
+        "reach": int(850 * k),
+        "views": int(2400 * k),
+        "accounts_engaged": int(60 * k),
+        "total_interactions": int(140 * k),
+        "profile_links_taps": int(9 * k),
+        # Como en una cuenta real recien empezada: Meta no siempre lo devuelve.
+        "follows_and_unfollows": "sin dato",
+    }
+
+
+def media_insights(media_id: str) -> dict[str, int | str]:
+    return {"reach": 410, "views": 980, "likes": 23, "comments": 4, "saved": 11, "shares": 3,
+            "total_interactions": 41}

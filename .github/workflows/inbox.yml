@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: '"pull" lee y redacta, "send" envia lo aprobado, "check" permisos, "selftest" reglas'
+        description: '"cycle" = send + pull (lo normal en el cron), "pull", "send", "metrics", "check" permisos, "selftest" reglas'
         type: string
         default: pull
       dry_run:
@@ -33,6 +33,10 @@ on:
         description: Libro de envios. Es lo unico que recuerda las respuestas privadas gastadas
         type: string
         default: _bandeja.log
+      metrics_out:
+        description: Informe de metricas que escribe el modo "metrics"
+        type: string
+        default: _metricas.md
       posts:
         description: Cuantas publicaciones recientes revisar en busca de comentarios
         type: number
@@ -92,8 +96,24 @@ jobs:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
         run: python -m inbox.cli check
 
+      # En "cycle" se envia ANTES de leer: lo aprobado desde la pasada anterior
+      # sale ya, y la lectura de despues no vuelve a encolar lo recien enviado.
+      # Un solo job en vez de dos ahorra la mitad de minutos de Actions, que en
+      # repos privados se redondean al minuto por job.
+      - name: Enviar lo aprobado (cycle)
+        id: cycle_send
+        if: ${{ inputs.mode == 'cycle' }}
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          python -m inbox.cli send             --bandeja "${{ inputs.bandeja }}"             --ledger "${{ inputs.ledger }}"             ${{ inputs.dry_run && '--dry-run' || '' }}
+
       - name: Leer DMs y comentarios y redactar borradores
-        if: ${{ inputs.mode == 'pull' }}
+        if: ${{ inputs.mode == 'pull' || inputs.mode == 'cycle' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.engine
           PYTHONUTF8: "1"
@@ -123,13 +143,25 @@ jobs:
             --ledger "${{ inputs.ledger }}" \
             ${{ inputs.dry_run && '--dry-run' || '' }}
 
+      - name: Informe de metricas
+        if: ${{ inputs.mode == 'metrics' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.engine
+          PYTHONUTF8: "1"
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          python -m inbox.cli metrics             --out "${{ inputs.metrics_out }}"             --posts "${{ inputs.posts }}"             ${{ inputs.dry_run && '--dry-run' || '' }}
+
       # `always()` por la misma razon que en `publish.yml`: si un envio sale y el
       # siguiente falla, el estado del que salio YA esta escrito. Perder eso
       # significaria volver a enviarlo en la pasada siguiente.
       - name: Guardar bandeja y libro de envios
         if: ${{ always() && inputs.mode != 'selftest' && inputs.mode != 'check' && !inputs.dry_run }}
         run: |
-          if git diff --quiet; then
+          # `git status` y no `git diff`: la primera vez la bandeja y el informe
+          # son ficheros nuevos, y `git diff` no ve los ficheros sin seguir.
+          if [ -z "$(git status --porcelain)" ]; then
             echo "Sin cambios que guardar."
             exit 0
           fi
@@ -137,4 +169,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "chore(inbox): actualiza bandeja y libro de envios [skip ci]"
+          # La persona aprueba en Obsidian y sube sus cambios cuando quiere: si
+          # lo ha hecho mientras corria el job, el push a secas se rechazaria.
+          git pull --rebase
           git push
+
+      # El send del modo "cycle" no para el job (para que el pull corra igual),
+      # pero su fallo tiene que seguir poniendo el workflow en rojo: ese rojo es
+      # el aviso de que algo se quedo sin enviar.
+      - name: Avisar si algo se quedo sin enviar
+        if: ${{ inputs.mode == 'cycle' && steps.cycle_send.outcome == 'failure' }}
+        run: |
+          echo "::error::Hay mensajes aprobados que no se enviaron. Mira el paso 'Enviar lo aprobado' y la bandeja."
+          exit 1

@@ -12,6 +12,7 @@ token; anadirlos despues obliga a regenerarlo):
 - leer y responder comentarios .... `instagram_business_manage_comments`
 - respuesta privada a comentario ... los **dos** de arriba
 - metricas ........................ `instagram_business_manage_insights`
+- menciones (etiquetas en fotos) ... `instagram_business_manage_comments`
 
 ⚠️ Pendiente de verificar contra la API real el 26 oct 2026: los nombres exactos
 de campo de `conversations` y `comments` en la ruta de Instagram Login. Estan
@@ -63,29 +64,130 @@ def fetch_media(ig_user_id: str, token: str, limit: int = 10) -> list[dict[str, 
     data = graph._get(
         f"{ig_user_id}/media",
         token,
-        fields="id,caption,timestamp,comments_count,permalink",
+        fields="id,caption,timestamp,comments_count,like_count,media_type,permalink",
         limit=limit,
     )
     return list(data.get("data") or [])
+
+
+def fetch_self(token: str) -> dict[str, str]:
+    """Quien es la cuenta del token: sus ids y su @.
+
+    Hace falta para reconocer **nuestros propios** mensajes y comentarios. Con
+    `ig_user_id = "me"` no basta: Meta devuelve en `from.id` el id numerico, y
+    comparar contra la cadena `me` daria por ajenos nuestros propios mensajes,
+    con lo que el bot encolaria respuestas a lo que hemos escrito nosotros.
+
+    En la ruta de Instagram Login, `/me` trae dos ids: `id` (el de la app) y
+    `user_id` (el de la cuenta profesional, el que sale en los mensajes). Se
+    guardan los dos y el @, y se compara contra cualquiera.
+    """
+    try:
+        data = graph._get("me", token, fields="id,user_id,username")
+    except MetaError:
+        data = graph._get("me", token, fields="id,username")
+    return {
+        "ids": ",".join(str(v) for v in (data.get("id"), data.get("user_id")) if v),
+        "username": str(data.get("username") or ""),
+    }
 
 
 def fetch_comments(media_id: str, token: str, limit: int = 50) -> list[dict[str, Any]]:
-    """Comentarios de una publicacion, con autor y marca de tiempo."""
+    """Comentarios de una publicacion, con autor, marca de tiempo y respuestas.
+
+    Las respuestas vienen anidadas para saber si **ya hemos contestado** en el
+    hilo: sin eso, un comentario contestado a mano desde el movil volveria a la
+    bandeja como pendiente.
+    """
     data = graph._get(
         f"{media_id}/comments",
         token,
-        fields="id,text,timestamp,username,from,parent_id",
+        fields="id,text,timestamp,username,from,parent_id,hidden,replies{id,username,from,timestamp}",
         limit=limit,
     )
     return list(data.get("data") or [])
 
 
-def fetch_insights(ig_user_id: str, token: str, metrics: str = "reach,impressions,profile_views") -> list[dict[str, Any]]:
-    """Metricas de la cuenta. Requiere `manage_insights`."""
+def fetch_tags(ig_user_id: str, token: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Publicaciones de otros donde han etiquetado a la cuenta (menciones).
+
+    Las menciones con @ dentro de un comentario ajeno solo llegan por webhook,
+    que este motor no tiene (no hay servidor que las reciba). Las etiquetas en
+    la foto si se pueden leer por cron, y son las que mas importan: alguien
+    ensenando la casa que le vendieron.
+    """
     data = graph._get(
-        f"{ig_user_id}/insights", token, metric=metrics, period="day"
+        f"{ig_user_id}/tags",
+        token,
+        fields="id,caption,timestamp,permalink,username,media_type",
+        limit=limit,
     )
     return list(data.get("data") or [])
+
+
+# Metricas de cuenta. Desde la v22 (2025) Meta retiro `impressions` y la
+# sustituyo por `views`; casi todas piden `metric_type=total_value`. Se piden
+# **una a una** a proposito: si Meta retira o renombra otra, falla esa linea
+# del informe y no el informe entero.
+ACCOUNT_METRICS = (
+    "reach",
+    "views",
+    "accounts_engaged",
+    "total_interactions",
+    "profile_links_taps",
+    "follows_and_unfollows",
+)
+
+MEDIA_METRICS = ("reach", "views", "likes", "comments", "saved", "shares", "total_interactions")
+
+
+def _value(entry: dict[str, Any]) -> int | None:
+    """Saca el numero de una metrica, venga como `total_value` o como serie."""
+    total = entry.get("total_value")
+    if isinstance(total, dict) and "value" in total:
+        return int(total["value"])
+    values = entry.get("values") or []
+    if values:
+        return int(sum(int(v.get("value") or 0) for v in values if isinstance(v.get("value"), (int, float))))
+    return None
+
+
+def fetch_insights(ig_user_id: str, token: str, since: int | None = None, until: int | None = None) -> dict[str, int | str]:
+    """Metricas de la cuenta en un periodo. Requiere `manage_insights`.
+
+    Devuelve `{metrica: numero}`; si una metrica falla, su valor es el texto del
+    error en vez de reventar. `since`/`until` en segundos Unix (Meta limita el
+    rango a 30 dias).
+    """
+    out: dict[str, int | str] = {}
+    for metric in ACCOUNT_METRICS:
+        params: dict[str, Any] = {"metric": metric, "period": "day", "metric_type": "total_value"}
+        if since is not None:
+            params["since"] = since
+        if until is not None:
+            params["until"] = until
+        try:
+            data = graph._get(f"{ig_user_id}/insights", token, **params)
+            entries = data.get("data") or []
+            value = _value(entries[0]) if entries else None
+            out[metric] = value if value is not None else "sin dato"
+        except MetaError as exc:
+            out[metric] = f"error: {str(exc)[:80]}"
+    return out
+
+
+def fetch_media_insights(media_id: str, token: str) -> dict[str, int | str]:
+    """Metricas de una publicacion, una a una por la misma razon que la cuenta."""
+    out: dict[str, int | str] = {}
+    for metric in MEDIA_METRICS:
+        try:
+            data = graph._get(f"{media_id}/insights", token, metric=metric)
+            entries = data.get("data") or []
+            value = _value(entries[0]) if entries else None
+            out[metric] = value if value is not None else "sin dato"
+        except MetaError as exc:
+            out[metric] = f"error: {str(exc)[:80]}"
+    return out
 
 
 # --------------------------------------------------------------------------

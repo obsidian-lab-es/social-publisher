@@ -185,9 +185,21 @@ python -m inbox.cli check
 # Lee DMs y comentarios nuevos y escribe borradores en la bandeja.
 python -m inbox.cli pull
 
-# Envía SOLO lo que una persona ha marcado como `aprobado`.
+# Envía SOLO lo que una persona ha marcado como `aprobado`,
+# y oculta los comentarios marcados `ocultar`.
 python -m inbox.cli send --dry-run
+
+# Informe semanal en `_metricas.md`: cuenta (7 y 28 días) y números por post.
+python -m inbox.cli metrics --demo --dry-run
 ```
+
+`pull` lee también las **menciones** (posts ajenos que etiquetan a la cuenta) y
+las deja como `aviso`: solo para leer, el bot no hace nada con ellas. Las
+menciones con @ dentro de comentarios ajenos solo llegan por webhook y aquí no
+se leen.
+
+En el workflow, el modo `cycle` hace `send` y después `pull` en un solo job, para
+gastar la mitad de minutos de Actions.
 
 **El bot redacta, la persona aprueba.** `pull` escribe bloques en `_bandeja.md`
 con estado `pendiente`. Nada sale hasta que alguien lo cambia a `aprobado` a
